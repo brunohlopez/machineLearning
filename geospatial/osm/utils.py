@@ -12,7 +12,9 @@ from shapely.geometry import Polygon, Point
 class OSMGeometries:
 
     def __init__(self, overpass_query):
-        self.overpass_query = overpass_query
+
+        api = overpy.Overpass()
+        self.overpass_query = api.query(overpass_query)
         
 
     def nodes_dataframe(self):
@@ -54,6 +56,7 @@ class OSMGeometries:
         final_frame = pd.DataFrame({"lon": lon_node, "lat": lat_node, "node_id": id_node, 'way_id': id_way})
 
         return final_frame
+        
 
     def relation_dataframe(self):
 
@@ -195,17 +198,31 @@ def view_values(key, base_url = "http://wiki.openstreetmap.org/wiki/Key:"):
 
     return final_frame
 
+def create_ways_geometry(geometries_csv, crs = 'EPSG:4326'):
 
-if __name__ == '_main__':
-    """
-    [bbox:44.453388800301774,-0.56304931640625,46.240651955001695,2.3345947265625]
-    [timeout:25]
-    ;
-    (
-    node["landuse"="vineyard"];
-    way["landuse"="vineyard"];
-    relation["landuse"="vineyard"];
-    );
-    out center;
-    """
+        geometries_list = []
+
+        for i in geometries_csv['way_id'].unique():
+
+            filter_frame = geometries_csv[geometries_csv['way_id'] == i]
+
+            if len(filter_frame > 1):
+                lat_point_list = filter_frame['lat']
+                lon_point_list = filter_frame['lon']
+
+                polygon_geo = Polygon(zip(lon_point_list, lat_point_list))
+                geometries_list.append(polygon_geo)
+
+            elif len == 1:
+                lat_point_list = filter_frame['lat']
+                lon_point_list = filter_frame['lon']
+                point_geo = Point(lon_point_list, lat_point_list)
+                geometries_list.append(point_geo)
+
+            else:
+                continue
+
+        return gpd.GeoDataFrame(geometry = geometries_list, crs = crs)
+
+
 
