@@ -56,6 +56,20 @@ class OSMGeometries:
         final_frame = pd.DataFrame({"lon": lon_node, "lat": lat_node, "node_id": id_node, 'way_id': id_way})
 
         return final_frame
+
+    def ways_dataframe_2(self):
+
+        #initialize a counter and we construct 
+        counter = 0
+
+        #figure out the array of the list, so we can initialize a zeros list the appropiate size
+        for way in self.overpass_query.ways:
+            the_nodes = way.get_nodes(resolve_missing = True)
+            counter += len(the_nodes)
+
+        return counter
+
+
         
 
     def relation_dataframe(self):
@@ -117,8 +131,6 @@ class OSMGeometries:
 
     def export_geom_shp(self, geometries_list, output_path, file_name):
         pass
-
-
 
 
 
@@ -226,3 +238,14 @@ def create_ways_geometry(geometries_csv, crs = 'EPSG:4326'):
 
 
 
+def ways_dataframe_2(osmGeometries):
+
+        #initialize a counter and we construct 
+    counter = 0
+
+    #figure out the array of the list, so we can initialize a zeros list the appropiate size
+    for way in osmGeometries.ways:
+        the_nodes = way.get_nodes(resolve_missing = True)
+        counter += len(the_nodes)
+
+    return counter
