@@ -6,6 +6,13 @@ import zipfile
 import random
 from streamlit_folium import st_folium
 import folium
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import transforms, models
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
 
 # Initialize the Earth Engine module
 try:
@@ -207,3 +214,4 @@ if 'map_click_spectra' in st.session_state and st.session_state['map_click_spect
 
 
 
+ 
