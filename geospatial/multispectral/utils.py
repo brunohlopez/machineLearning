@@ -1,8 +1,18 @@
 import ee
+import os
+import zipfile
 import geemap
 import random
 import imageio
+import streamlit as st
 from PIL import Image
+
+# Initialize Earth Engine
+try:
+    ee.Initialize()
+except Exception:
+    ee.Authenticate()
+    ee.Initialize()
 
 
 def mask_s2_clouds(image):
@@ -108,6 +118,34 @@ def random_location_map():
 
     return m
 
-# Call the function to display the map
-random_map = random_location_map()
-random_map
+def read_shapefile(uploaded_file):
+    with zipfile.ZipFile(uploaded_file, 'r') as z:
+        z.extractall("shapefile")
+    shapefile_path = "shapefile"
+    # Find the .shp file
+    shp_files = [f for f in os.listdir(shapefile_path) if f.endswith('.shp')]
+    if shp_files:
+        shp_path = os.path.join(shapefile_path, shp_files[0])
+        return geemap.shp_to_ee(shp_path)
+    else:
+        st.error("No .shp file found in the uploaded zip file.")
+        return None
+
+def is_land(lat, lon):
+    try:
+        landcover = ee.Image('MODIS/006/MCD12Q1/2019_01_01').select('LC_Type1')
+        point = ee.Geometry.Point([lon, lat])
+        land_mask = landcover.reduceRegion(
+            reducer=ee.Reducer.first(), geometry=point, scale=30
+        ).get('LC_Type1')
+        land_mask_info = land_mask.getInfo()
+        return land_mask_info != 0 and land_mask_info is not None  # Returns True if it's land
+    except Exception as e:
+        st.error(f"Error checking if point is land: {e}")
+        return False
+
+
+
+# # Call the function to display the map
+# random_map = random_location_map()
+# random_map
