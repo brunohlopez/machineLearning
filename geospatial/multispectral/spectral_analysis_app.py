@@ -6,6 +6,8 @@ import geopandas as gpd
 from shapely.geometry import Point
 from rtree import index
 import os
+import datetime
+import folium
 
 # Initialize Earth Engine
 try:
@@ -18,6 +20,7 @@ from sentinel_timelapse import SentinelTimelapse
 from streamlit_folium import st_folium
 import matplotlib.pyplot as plt
 import geemap.foliumap as geemap
+from folium.plugins import MiniMap
 
 # Load cities and build spatial index
 @st.cache_resource  # Updated caching decorator
@@ -58,10 +61,16 @@ lon = st.session_state.get('lon', 0)
 input_lat = st.sidebar.text_input("Latitude", value=str(lat))
 input_lon = st.sidebar.text_input("Longitude", value=str(lon))
 
+# Sidebar for date range and cloud cover input
+st.sidebar.header("Data Filters")
+start_date = st.sidebar.date_input("Start Date", value=datetime.date(2021, 12, 1))
+end_date = st.sidebar.date_input("End Date", value=datetime.date(2022, 2, 28))
+cloud_cover = st.sidebar.slider("Max Cloud Cover (%)", min_value=0, max_value=100, value=50)
+
 # Display random location map with indices and enable spectral analysis
 if st.button('Show Random Location Map and Enable Spectral Analysis'):
     timelapse_creator = st.session_state['timelapse_creator']
-    random_map = timelapse_creator.random_location_map(load_initially='RGB')  # Load only RGB initially
+    random_map = timelapse_creator.random_location_map(load_initially='RGB')
     if random_map is not None:
         st.session_state['random_map'] = random_map
         st.session_state['lat'] = timelapse_creator.lat
@@ -94,27 +103,29 @@ if 'random_map' in st.session_state:
 
     timelapse_creator = st.session_state['timelapse_creator']
 
-    # Adjusted date range and cloud cover threshold
-    start_date = '2021-12-01'
-    end_date = '2022-02-28'
-    cloud_cover = 50  # Increased cloud cover threshold
+    # Convert dates to strings
+    start_date_str = start_date.strftime('%Y-%m-%d')
+    end_date_str = end_date.strftime('%Y-%m-%d')
 
-    dataset = (ee.ImageCollection('COPERNICUS/S2_HARMONIZED')
-               .filterDate(start_date, end_date)
-               .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_cover))
-               .filterBounds(ee.Geometry.Point([lon, lat]))
-               .map(timelapse_creator.mask_s2_clouds)
-               .map(timelapse_creator.calculate_indices))
+    # Get the dataset (global)
+    @st.cache_data(show_spinner=False)
+    def get_dataset(start_date_str, end_date_str, cloud_cover):
+        dataset = (ee.ImageCollection('COPERNICUS/S2_HARMONIZED')
+                   .filterDate(start_date_str, end_date_str)
+                   .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_cover))
+                   .map(timelapse_creator.mask_s2_clouds)
+                   .map(timelapse_creator.calculate_indices))
+        return dataset
+
+    dataset = get_dataset(start_date_str, end_date_str, cloud_cover)
 
     # Check if the dataset is empty
     if dataset.size().getInfo() == 0:
-        st.error("No images found for the selected location and date range. Please adjust the date range or cloud cover threshold.")
+        st.error("No images found for the selected date range and cloud cover threshold.")
     else:
         # Proceed with getting the first image
         first_image = dataset.first()
         band_names = first_image.bandNames().getInfo()
-        #print("Available bands:", band_names)
-        # st.write("Available bands:", band_names)  # Uncomment to display in the app
 
         # Visualization parameters
         ndvi_vis = {'min': -1, 'max': 1, 'palette': ['blue', 'white', 'green']}
@@ -161,22 +172,29 @@ if 'random_map' in st.session_state:
 
         # Add light pollution layer (VIIRS Nighttime Lights)
         viirs = ee.ImageCollection('NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG') \
-            .filterDate(start_date, end_date) \
+            .filterDate(start_date_str, end_date_str) \
             .select('avg_rad') \
             .median()
 
         viirs_vis = {'min': 0, 'max': 60, 'palette': ['black', 'blue', 'purple', 'cyan', 'green', 'yellow', 'red']}
         click_map.add_layer(viirs, viirs_vis, 'Nighttime Lights', shown=False)
 
-        # # Add basemaps
-        # basemaps = ['CartoDB Positron', 'Stamen Toner', 'Stamen Watercolor',
-        #             'CartoDB DarkMatter', 'Esri WorldImagery']
+        # Add basemaps
+        basemaps = ['CartoDB.Positron',  'CartoDB.DarkMatter']
 
-        # for basemap in basemaps:
-        #     if basemap in geemap.basemaps:
-        #         click_map.add_basemap(basemap)
-        #     else:
-        #         st.warning(f"Basemap '{basemap}' is not available.")
+        # List available basemaps
+        available_basemaps = list(geemap.basemaps.keys())
+        # st.write("Available basemaps:", available_basemaps)  # Uncomment to display in the app
+
+        for basemap in basemaps:
+            if basemap in geemap.basemaps:
+                click_map.add_basemap(basemap)
+            else:
+                st.warning(f"Basemap '{basemap}' is not available.")
+
+        # Add the MiniMap plugin
+        minimap = MiniMap(toggle_display=True, position='bottomright')
+        click_map.add_child(minimap)
 
         click_map.add_layer_control()
 
@@ -194,14 +212,15 @@ if 'random_map' in st.session_state:
             point = ee.Geometry.Point([lon_click, lat_click])
             # Update dataset to use the harmonized collection
             image = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                     .filterBounds(point)
-                     .filterDate(start_date, end_date)
+                     .filterDate(start_date_str, end_date_str)
                      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_cover))
+                     .filterBounds(point)
                      .first())
             if image and image.getInfo():  # Check if image exists
                 spectra = image.reduceRegion(reducer=ee.Reducer.mean(), geometry=point, scale=10).getInfo()
                 if spectra:
-                    st.write(f"Spectra at point ({lat_click}, {lon_click}): {spectra}")
+                    st.write(f"Spectra at point ({lat_click}, {lon_click}):")
+                    st.json(spectra)
 
                     # Plot spectra if data is valid
                     bands = list(spectra.keys())
