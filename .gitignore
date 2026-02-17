@@ -1,4 +1,7 @@
 
+#dont upload env keys
+.env
+
 #machine learning modules
 .pth
 
