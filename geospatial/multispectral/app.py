@@ -1,14 +1,27 @@
 import datetime
 import io
 import os
+import time
 
 import folium
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 from streamlit_folium import st_folium
 
+from drift import (
+    DRIFT_SITES,
+    FETCH_TIMEOUT_S,
+    FRAME_CAP,
+    MAX_RECORD_SECONDS,
+    DriftEngine,
+    build_gif_bytes,
+    build_mp4_bytes,
+    drift_component_html,
+    site_by_name,
+)
 from sentinel_analysis import (
     INDEX_COLORMAPS,
     SEVERITY_CLASSES,
@@ -39,12 +52,18 @@ for key, default in [
     ('wf_bounds', None),
     ('wf_stats', None),
     ('wf_params', {}),
+    ('drift_engine', None),
+    ('drift_cfg', None),
+    ('drift_running', False),
+    ('drift_last', None),
+    ('drift_gif', None),
+    ('drift_mp4', None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-tab_spectral, tab_timelapse, tab_wildfire = st.tabs(
-    ["Spectral Analysis", "Timelapse", "Wildfire / Burn Scar"]
+tab_spectral, tab_timelapse, tab_wildfire, tab_drift = st.tabs(
+    ["Spectral Analysis", "Timelapse", "Wildfire / Burn Scar", "Drift"]
 )
 
 # ── Shared sidebar controls ───────────────────────────────────────────────────
@@ -429,3 +448,297 @@ with tab_wildfire:
                 )
                 st.metric("Total Burned Area",  f"{burned_km2:,.1f} km²")
                 st.metric("High Severity Area", f"{high_km2:,.1f} km²")
+
+# ── Tab 4: Drift ──────────────────────────────────────────────────────────────
+with tab_drift:
+    st.markdown(
+        "Cinematic flythrough over Sentinel-2 imagery. Tiles stream in ahead "
+        "of the pan; when a corridor runs out (or hits open ocean), the view "
+        "can cut to a new location around the world. Export what you watched "
+        "as a GIF or record an MP4."
+    )
+
+    d_ctl, d_view = st.columns([1, 3])
+
+    with d_ctl:
+        st.subheader("Flythrough")
+        d_source = st.radio(
+            "Imagery source",
+            ["Instant basemap", "Live Sentinel-2"],
+            key='d_source', horizontal=True,
+            help="**Instant basemap**: EOX Sentinel-2 cloudless mosaic — "
+                 "pre-rendered tiles, loads in ~1-2 s, fully seamless "
+                 "(© EOX, s2maps.eu, free for non-commercial use). "
+                 "**Live Sentinel-2**: real dated scenes streamed from S3 "
+                 "with your sidebar date/cloud filters — slower (~10-30 s "
+                 "per tile) but it's the actual data.",
+        )
+        d_site = st.selectbox(
+            "Start location",
+            ["Random"] + [s[0] for s in DRIFT_SITES] + ["Custom coordinates…"],
+            key='d_site',
+        )
+        d_custom_lat = d_custom_lon = None
+        if d_site == "Custom coordinates…":
+            cc1, cc2 = st.columns(2)
+            d_custom_lat = cc1.number_input(
+                "Lat", -80.0, 80.0, 37.7700, format="%.4f", key='d_custom_lat'
+            )
+            d_custom_lon = cc2.number_input(
+                "Lon", -180.0, 180.0, -122.4200, format="%.4f", key='d_custom_lon'
+            )
+        d_speed = st.slider(
+            "Speed (deg/s)", 0.002, 0.050, 0.012, step=0.002,
+            format="%.3f", key='d_speed',
+        )
+        d_heading_mode = st.radio(
+            "Heading", ["Random walk", "Fixed"], horizontal=True,
+            key='d_heading_mode',
+        )
+        d_heading = None
+        if d_heading_mode == "Fixed":
+            d_heading = st.slider("Compass (°)", 0, 359, 90, key='d_heading')
+
+        d_radius = st.slider(
+            "Tile radius (deg)", 0.05, 0.30, 0.15, step=0.05, key='d_radius',
+        )
+        d_res = st.select_slider(
+            "Resolution (deg/px)", options=[0.0005, 0.001, 0.002],
+            value=0.001, key='d_res',
+            help="Finer = sharper but slower tile fetches",
+        )
+        d_gap_fill = st.toggle(
+            "Fill data gaps", value=True, key='d_gap_fill',
+            disabled=(d_source == "Instant basemap"),
+            help="Live source only: fill cloud-masked holes with pixels from "
+                 "the unmasked median so the view isn't speckled with black. "
+                 "Turn off to see exactly which pixels the cloud mask removed.",
+        )
+        d_jump = st.toggle(
+            "Random jump at corridor end", value=True, key='d_jump',
+            help="Cut to a new world location when the corridor runs out "
+                 "or imagery goes empty (ocean / no clear-sky)",
+        )
+        d_corridor = st.slider(
+            "Tiles per corridor", 2, 12, 5, key='d_corridor',
+            disabled=not d_jump,
+        )
+        d_fps = st.slider("Export fps", 4, 24, 10, key='d_fps')
+
+        st.caption(
+            "While drifting, the app refreshes continuously — pause before "
+            "working in the other tabs. Changing tile radius, resolution, or "
+            "the sidebar date/cloud filters restarts the drift."
+        )
+
+    # ── Engine lifecycle: rebuild only when fetch-relevant params change ─────
+    d_cfg = {
+        'radius': d_radius, 'res': d_res, 'site': d_site,
+        'custom': (d_custom_lat, d_custom_lon),
+        'source': d_source, 'gap_fill': d_gap_fill,
+        'start': start_str, 'end': end_str, 'cloud': cloud_cover,
+    }
+    eng = st.session_state['drift_engine']
+    if eng is None or st.session_state['drift_cfg'] != d_cfg:
+        if eng is not None:
+            eng.shutdown()
+        if d_site == "Random":
+            site = None
+        elif d_site == "Custom coordinates…":
+            site = (f"Custom ({d_custom_lat:.3f}°, {d_custom_lon:.3f}°)",
+                    d_custom_lat, d_custom_lon)
+        else:
+            site = site_by_name(d_site)
+        eng = DriftEngine(
+            radius_deg=d_radius, resolution=d_res,
+            start=start_str, end=end_str, cloud=cloud_cover, site=site,
+            source=('instant' if d_source == "Instant basemap" else 'live'),
+            gap_fill=d_gap_fill,
+        )
+        st.session_state['drift_engine'] = eng
+        st.session_state['drift_cfg'] = d_cfg
+        st.session_state['drift_running'] = False
+        st.session_state['drift_last'] = None
+
+    with d_ctl:
+        b_run, b_reset, b_rec = st.columns(3)
+        run_label = "⏸ Pause" if st.session_state['drift_running'] else "▶ Start"
+        if b_run.button(run_label, key='d_run_btn', type="primary"):
+            st.session_state['drift_running'] = not st.session_state['drift_running']
+            st.session_state['drift_last'] = None
+            st.rerun()
+        if b_reset.button("⟲ Reset", key='d_reset_btn'):
+            eng.shutdown()
+            st.session_state['drift_engine'] = None
+            st.session_state['drift_running'] = False
+            st.session_state['drift_gif'] = None
+            st.session_state['drift_mp4'] = None
+            st.rerun()
+        rec_label = "⏹ Stop" if eng.recording else "⏺ Record"
+        if b_rec.button(rec_label, key='d_rec_btn'):
+            if eng.recording:
+                eng.recording = False
+                if eng.record_frames:
+                    with st.spinner("Encoding MP4…"):
+                        st.session_state['drift_mp4'] = build_mp4_bytes(
+                            eng.record_frames, d_fps
+                        )
+            else:
+                eng.record_frames = []
+                eng.recording = True
+                st.session_state['drift_mp4'] = None
+            st.rerun()
+
+        if st.button("Preload 3×3 region", key='d_preload_btn',
+                     help="Fetch the full surrounding grid of tiles up front "
+                          "for a long, uninterrupted immersive corridor"):
+            eng.preload()
+
+        if st.button("Export GIF", key='d_gif_btn', disabled=not eng.frames):
+            with st.spinner("Assembling GIF…"):
+                st.session_state['drift_gif'] = build_gif_bytes(eng.frames, d_fps)
+
+        if st.session_state['drift_gif']:
+            st.download_button(
+                "Download GIF", st.session_state['drift_gif'],
+                "drift.gif", "image/gif", key='d_gif_dl',
+            )
+        if st.session_state['drift_mp4']:
+            st.download_button(
+                "Download MP4", st.session_state['drift_mp4'],
+                "drift.mp4", "video/mp4", key='d_mp4_dl',
+            )
+
+    with d_view:
+        eng.poll()
+        running = st.session_state['drift_running']
+
+        if running and eng.mosaic_b64() is not None:
+            now = time.time()
+            last = st.session_state['drift_last']
+            dt = min(now - last, 5.0) if last else 0.0
+            st.session_state['drift_last'] = now
+            if d_heading is not None:
+                eng.heading = float(d_heading)
+            if dt > 0:
+                eng.tick(
+                    dt, d_speed,
+                    random_walk=(d_heading_mode == "Random walk"),
+                    capture_fps=d_fps, capture=True,
+                )
+            # Jump / bounce logic
+            if d_jump:
+                if eng.jump_target is not None:
+                    eng.try_complete_jump()
+                elif eng.need_jump(d_corridor):
+                    eng.start_jump()
+            elif eng.current_tile_empty():
+                eng.bounce()
+        elif running:
+            # First tile still in flight — hold position, keep polling.
+            st.session_state['drift_last'] = time.time()
+
+        mos = eng.mosaic_b64()
+        if mos is None:
+            err = eng.current_tile_error()
+            wait = eng.current_wait_seconds()
+            if err:
+                st.error(f"Couldn't load imagery for **{eng.site_name}**: {err}")
+                e_retry, e_other = st.columns(2)
+                if e_retry.button("Retry this location", key='d_retry_btn'):
+                    eng.retry(eng.current_key())
+                    st.rerun()
+                if e_other.button("Try a different site", key='d_other_btn'):
+                    eng.shutdown()
+                    st.session_state['drift_engine'] = None
+                    st.rerun()
+            else:
+                waited = f" — {int(wait)}s elapsed" if wait else ""
+                st.info(
+                    f"Fetching first tile over **{eng.site_name}** from S3…"
+                    f"{waited} (typically 10–30 s, gives up at "
+                    f"{FETCH_TIMEOUT_S}s). The pan starts automatically once "
+                    "imagery lands."
+                )
+                if wait and wait > 8:
+                    st.caption(
+                        "Taking longer than usual — this streams live imagery "
+                        "from S3, so it depends on your connection. If it errors "
+                        "out you'll get a Retry button here."
+                    )
+                if running:
+                    def _cancel_wait(engine=eng):
+                        engine.shutdown()
+                        st.session_state['drift_engine'] = None
+                        st.session_state['drift_running'] = False
+                    st.button(
+                        "Cancel and pick another site", key='d_cancel_wait_btn',
+                        on_click=_cancel_wait,
+                    )
+        else:
+            b64, bounds = mos
+            # If holding at an edge waiting on imagery, freeze the client pan
+            # too — otherwise it would extrapolate into the void.
+            client_speed = 0.0 if eng.waiting else d_speed
+            components.html(
+                drift_component_html(
+                    b64, bounds, eng.lat, eng.lon,
+                    speed=client_speed, heading=eng.heading,
+                    tile_size=eng.tile_size, running=running,
+                    site_name=eng.site_name,
+                ),
+                height=480,
+            )
+
+        prog = eng.preload_progress()
+        if prog is not None:
+            st.progress(prog, text=f"Preloading region… {int(prog * 100)} %")
+        if eng.waiting:
+            st.caption("⏳ Holding at tile edge — imagery ahead is still loading…")
+
+        # ── Status row ───────────────────────────────────────────────────────
+        s1, s2, s3, s4 = st.columns(4)
+        s1.caption(f"**Site:** {eng.site_name}")
+        s2.caption(f"**Pos:** {eng.lat:.3f}°, {eng.lon:.3f}°")
+        s3.caption(
+            f"**Tiles:** {len(eng.tiles)} cached · {eng.fetching()} fetching"
+        )
+        s4.caption(
+            f"**Corridor:** {eng.tiles_crossed} crossed · "
+            f"{len(eng.frames)} frames buffered"
+        )
+
+        if eng.jump_target is not None:
+            st.caption(f"✈ Prefetching next stop: **{eng.jump_target[0]}**…")
+        if eng.frame_cap_hit:
+            st.warning(
+                f"Frame buffer hit its {FRAME_CAP}-frame cap — GIF export "
+                "keeps only the most recent frames."
+            )
+        if eng.recording:
+            rec_s = len(eng.record_frames) / max(1, d_fps)
+            st.markdown(
+                f"<span style='color:#ef4444'>●</span> Recording — "
+                f"{int(rec_s // 60):02d}:{int(rec_s % 60):02d}",
+                unsafe_allow_html=True,
+            )
+            if rec_s >= MAX_RECORD_SECONDS:
+                eng.recording = False
+                with st.spinner("Recording cap reached — encoding MP4…"):
+                    st.session_state['drift_mp4'] = build_mp4_bytes(
+                        eng.record_frames, d_fps
+                    )
+                st.warning(f"Recording auto-stopped at {MAX_RECORD_SECONDS} s.")
+            elif rec_s >= 0.8 * MAX_RECORD_SECONDS:
+                st.warning(
+                    f"Approaching the {MAX_RECORD_SECONDS} s recording cap."
+                )
+
+        if running:
+            time.sleep(1.2)
+            st.rerun()
+        elif eng.preload_progress() is not None or (mos is None and eng.fetching()):
+            # Not running, but tiles are inbound (preload / first fetch):
+            # keep polling so progress and the first frame appear on their own.
+            time.sleep(1.0)
+            st.rerun()

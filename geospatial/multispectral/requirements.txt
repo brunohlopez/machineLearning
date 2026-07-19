@@ -12,3 +12,4 @@ matplotlib>=3.8.0
 streamlit>=1.35.0
 streamlit-folium>=0.20.0
 folium>=0.16.0
+imageio[ffmpeg]>=2.31.0

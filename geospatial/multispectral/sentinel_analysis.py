@@ -1,6 +1,18 @@
 import io
+import os
 import base64
 from typing import Dict, List, Optional, Tuple
+
+# GDAL/rasterio (used under the hood by stackstac for the actual S3 reads
+# during .compute()) has no timeout by default — a stalled/black-holed
+# connection can hang a read forever with zero feedback. Set process-wide
+# bounds *before* rasterio/GDAL is touched anywhere, so every read — plain
+# usage and the Drift tab's background-thread prefetches alike — fails fast
+# and raises instead of hanging. Real env vars take precedence if already set.
+os.environ.setdefault('GDAL_HTTP_TIMEOUT', '20')
+os.environ.setdefault('GDAL_HTTP_CONNECTTIMEOUT', '10')
+os.environ.setdefault('GDAL_HTTP_MAX_RETRY', '2')
+os.environ.setdefault('GDAL_HTTP_RETRY_DELAY', '1')
 
 import numpy as np
 import requests
@@ -59,7 +71,9 @@ INDEX_COLORMAPS: Dict[str, str] = {
 
 class SentinelAnalyzer:
     def __init__(self):
-        self.catalog = pystac_client.Client.open(STAC_URL)
+        # timeout guards against a silently stalled connection hanging forever
+        # (connect timeout, read timeout) in seconds.
+        self.catalog = pystac_client.Client.open(STAC_URL, timeout=(10, 20))
 
     def search(self, bbox: List[float], start_date: str,
                end_date: str, cloud_pct: int = 30) -> list:
@@ -74,12 +88,17 @@ class SentinelAnalyzer:
         )
 
     def load_stack(self, items: list, bbox: List[float],
-                   resolution: float = 0.001) -> xr.DataArray:
+                   resolution: float = 0.001,
+                   assets: Optional[List[str]] = None) -> xr.DataArray:
         """
         Lazy-load bands into an xarray stack in WGS-84.
         resolution in degrees — 0.001° ≈ 111 m at equator.
+        assets: subset of bands to load (default: all 12 spectral + scl).
+        Loading only what you need is a large speedup — e.g. RGB tiles for
+        the Drift tab load 4 assets instead of 13.
         """
-        assets = list(SPECTRAL_ASSETS.keys()) + ['scl']
+        if assets is None:
+            assets = list(SPECTRAL_ASSETS.keys()) + ['scl']
         return stackstac.stack(
             items,
             assets=assets,
@@ -91,10 +110,12 @@ class SentinelAnalyzer:
         )
 
     def cloud_mask(self, stack: xr.DataArray) -> xr.DataArray:
-        """Mask clouds / shadows using SCL band (values 3, 8, 9, 10)."""
+        """Mask clouds / shadows using SCL band (values 3, 8, 9, 10).
+        Works with any subset of spectral bands (as long as scl is loaded)."""
         scl  = stack.sel(band='scl')
         bad  = (scl == 3) | (scl == 8) | (scl == 9) | (scl == 10)
-        spec = stack.sel(band=list(SPECTRAL_ASSETS.keys()))
+        spec_bands = [b for b in stack.band.values.tolist() if b != 'scl']
+        spec = stack.sel(band=spec_bands)
         return spec.where(~bad)
 
     def median_composite(self, stack: xr.DataArray) -> xr.DataArray:
@@ -144,6 +165,65 @@ class SentinelAnalyzer:
             rgba, _ = self.render_rgb(comp)
             frames.append(Image.fromarray(rgba, 'RGBA').convert('RGB'))
         return frames
+
+    def drift_tile(
+        self,
+        bbox: List[float],
+        start: str,
+        end: str,
+        cloud: int,
+        resolution: float = 0.001,
+        gap_fill: bool = True,
+        stretch: Optional[Tuple[float, float]] = None,
+        max_scenes: int = 4,
+    ) -> Optional[Dict]:
+        """
+        Fast RGB tile for Drift mode. Compared to the full pipeline this:
+        - loads only red/green/blue + scl (4 assets instead of 13),
+        - keeps just the `max_scenes` least-cloudy scenes,
+        - optionally fills cloud-mask holes from the unmasked median
+          (gap_fill), so the flythrough doesn't show black speckle,
+        - accepts a fixed (lo, hi) stretch so brightness stays consistent
+          across tiles instead of re-normalizing per tile.
+        Returns {'rgba', 'bounds', 'stretch'} or None if no scenes.
+        """
+        items = self.search(bbox, start, end, cloud)
+        if not items:
+            return None
+        items = sorted(
+            items, key=lambda it: it.properties.get('eo:cloud_cover', 100.0)
+        )[:max_scenes]
+
+        stack  = self.load_stack(items, bbox, resolution,
+                                 assets=['red', 'green', 'blue', 'scl'])
+        masked = self.cloud_mask(stack)
+        comp   = masked.median(dim='time', skipna=True)
+        if gap_fill:
+            raw  = stack.sel(band=['red', 'green', 'blue']).median(
+                dim='time', skipna=True
+            )
+            comp = comp.fillna(raw)
+        comp = comp.compute()
+
+        rgb = np.stack(
+            [comp.sel(band=b).values for b in ('red', 'green', 'blue')],
+            axis=-1,
+        )
+        valid = ~np.any(np.isnan(rgb), axis=-1)
+        if not valid.any():
+            return None
+        if stretch is None:
+            lo, hi = np.nanpercentile(rgb[valid], (2, 98))
+        else:
+            lo, hi = stretch
+        norm  = np.clip((rgb - lo) / (hi - lo + 1e-8), 0, 1)
+        alpha = (valid * 255).astype(np.uint8)
+        rgba  = np.dstack([(norm * 255).astype(np.uint8), alpha])
+        return {
+            'rgba':    rgba,
+            'bounds':  self._bounds(comp),
+            'stretch': (float(lo), float(hi)),
+        }
 
     # ── Point queries ─────────────────────────────────────────────────────────
 
@@ -225,7 +305,7 @@ class SentinelAnalyzer:
         blue, s16, s22  = b('blue'), b('swir16'), b('swir22')
 
         if   name == 'NDVI':  return nd('nir', 'red')
-        elif name == 'NDWI':  return nd('nir', 'swir16')
+        elif name == 'NDWI':  return nd('green', 'nir')      # McFeeters 1996
         elif name == 'EVI':   return 2.5 * (nir - red) / (nir + 6*red - 7.5*blue + 1)
         elif name == 'SAVI':  return 1.5 * (nir - red) / (nir + red + 0.5)
         elif name == 'NBR':   return nd('nir', 'swir22')
@@ -235,7 +315,7 @@ class SentinelAnalyzer:
         elif name == 'NDSI':  return nd('green', 'swir16')
         elif name == 'NDBI':  return nd('swir16', 'nir')
         elif name == 'MNDWI': return nd('green', 'swir16')
-        elif name == 'NBR2':  return nd('swir22', 'nir')
+        elif name == 'NBR2':  return nd('swir16', 'swir22')  # USGS NBR2
         else: raise ValueError(f"Unknown index: {name}")
 
     def _classify_severity(self, dnbr: np.ndarray) -> np.ndarray:
