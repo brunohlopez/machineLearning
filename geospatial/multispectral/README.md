@@ -1,84 +1,80 @@
-# Sentinel-2 Multispectral Analysis
+# Sentinel Flyover
 
-Interactive Streamlit app for Sentinel-2 imagery analysis. **No Google Earth Engine account required** — data streams directly from AWS S3 via the Element84 Earth Search STAC catalog.
+A continuous, full-screen flyover of **live Sentinel-2 L2A imagery**, streamed straight from the open archive into the browser. No server, no API keys, no build step: open `index.html` and it starts flying.
+
+Each leg of the flight picks a recent, low-cloud scene, reads the raw band GeoTIFFs on the fly, composites them client-side, and pans across the ground at a steady speed. When a strip runs out it either continues into the neighbouring tile or jumps to somewhere new on Earth, cross-fading between scenes so the motion never stops.
 
 ## Features
 
-- **Spectral Analysis** — Click any land pixel to plot the full reflectance curve across 12 bands (443–2190 nm)
-- **12 Spectral Indices** — Toggle between NDVI, NDWI, EVI, SAVI, NBR, NDMI, GNDVI, NDRE, NDSI, NDBI, MNDWI, NBR2
-- **Live Weather** — Current conditions via [Open-Meteo](https://open-meteo.com/) for any clicked point (no API key)
-- **Monthly Timelapse** — Animated GIF from monthly median composites for any region
-- **Drift Mode** — Cinematic flythrough that pans continuously across imagery, prefetching tiles ahead of the motion; jumps to a new world location when a corridor runs out (or hits ocean). Export the run as a GIF or record an MP4
-- **Cloud Masking** — SCL-band masking (cloud shadow, medium/high cloud, cirrus)
+- **Live L2A data** — scenes come from the [Element84 Earth Search](https://earth-search.aws.element84.com/v1) STAC catalog; pixels are read directly from the cloud-optimized GeoTIFFs on AWS with [geotiff.js](https://geotiffjs.github.io/).
+- **Band composites** — true color, color infrared, shortwave IR, agriculture, geology, urban and land/water.
+- **Spectral indices** — NDVI, EVI, SAVI, NDRE, NDWI, NDCI, NDMI, NBR, NDBI, BSI and NDSI, each with its own color ramp and formula shown on screen.
+- **L2A products** — the Sen2Cor scene classification, aerosol optical thickness (haze) and water vapour layers.
+- **~90 curated places** — volcanoes, deltas, glaciers, mines, solar parks, cities — each opening in the view that suits it best, mixed with random land.
+- **Pick anywhere** — search for a place (Photon geocoder) or click on a street, satellite or terrain map to fly there, or type `lat, lon`.
+- **Flight-plan locator** — a minimap shows where you are and the strip being flown.
+- **Clip recording** — record MP4 (WebCodecs) or GIF clips, or run a batch of clips across many places. Each clip gets a `.txt` caption with the Copernicus credit, and a batch also writes a CSV index.
+- **Adaptive loading** — the next scene is searched and pre-fetched well before the current one ends; the map is rendered past the screen edge so tiles arrive before they are seen.
 
-## Stack
+## Running it
 
-| Layer | Library |
-|---|---|
-| Satellite data | Sentinel-2 L2A via [Element84 Earth Search](https://earth-search.aws.element84.com/v1) |
-| Lazy S3 loading | `stackstac` |
-| STAC search | `pystac-client` |
-| Array ops | `xarray` + `numpy` |
-| Weather | Open-Meteo REST API |
-| UI | `streamlit` + `streamlit-folium` + `folium` |
-| Viz | `matplotlib` + `pillow` |
-
-## Setup
+It is a static page. Serve the folder with any web server:
 
 ```bash
-pip install -r requirements.txt
-streamlit run app.py
+cd geospatial/multispectral
+python -m http.server 8000
+# open http://localhost:8000
 ```
 
-No authentication needed.
+Or publish it with **GitHub Pages** and open `.../geospatial/multispectral/`.
 
-## Architecture
+Start at a specific spot by adding coordinates to the URL hash, e.g. `index.html#36.1,-112.1`.
+
+## Controls
+
+| Key | Action |
+|---|---|
+| `Space` | Pause / resume |
+| `←` `→` | Ground speed |
+| `↑` `↓` | Detail (metres per screen pixel; 10 m is the sensor's native resolution) |
+| `1`–`7` | Band composites |
+| `P` | Pick a place on a map |
+| `N` | Next scene |
+| `R` | Record panel |
+| `H` | Hide overlays |
+| `F` | Full screen |
+
+Settings (speed, detail, brightness, view) are remembered in the browser between visits.
+
+## How it works
 
 ```
 multispectral/
-├── sentinel_analysis.py   # SentinelAnalyzer class + fetch_weather() + rgba_to_base64()
-├── app.py                 # Streamlit app — Spectral / Timelapse / Wildfire / Drift tabs
-├── drift.py               # Drift engine — tile grid, LRU cache, threaded prefetch,
-│                          #   random-jump sites, GIF/MP4 export, canvas pan component
-└── requirements.txt
+├── index.html   # page structure: stage, HUD, record panel, place picker
+├── styles.css   # layout and theme
+└── app.js       # everything else
 ```
 
-### Drift mode
+`app.js` is organized in sections:
 
-The world is modeled as a grid of tiles (side = 2 × tile radius). Each tile is a
-cloud-masked median RGB composite fetched through the same STAC/stackstac
-pipeline as the other tabs. An LRU cache holds the last few tiles; when the pan
-position gets within ~20% of a tile edge in the direction of travel, the next
-tile is fetched on a background thread so motion never stalls on S3. Panning is
-animated client-side (canvas + `requestAnimationFrame` over a stitched mosaic),
-so it stays smooth between Streamlit reruns. When the corridor runs out — N
-tiles crossed, or a tile comes back empty (ocean / no clear-sky) — the view
-prefetches one of ~30 curated global sites and cuts over without a blank frame.
-Viewport frames are buffered continuously (capped at 300) for GIF export, and a
-Record toggle writes an MP4 via `imageio-ffmpeg` (capped at 90 s).
+1. **Configuration** — STAC endpoint, speeds, resolutions, band table, view and index definitions, curated places.
+2. **Reading the rasters** — every band is its own COG with internal overviews. For each map tile the matching window is read from each band at the best overview and stacked; decoding runs in a small worker pool.
+3. **Finding scenes** — STAC searches over the last ~18 months, relaxing the cloud-cover threshold in steps (12 → 35 → 75%) until a usable scene is found.
+4. **The flight plan** — chooses a heading and a strip across the scene footprint sized to the current speed and detail.
+5. **The two projectors** — two OpenLayers maps, one showing the current leg while the other loads the next, cross-faded on the switch. Composites and indices are computed on the GPU with OpenLayers WebGL tile-layer style expressions, with an automatic brightness stretch.
+6. **Recording** — frames are captured from the stage canvas and encoded to H.264 MP4 (`mp4-muxer`) or GIF (`gifenc`); a folder can be chosen once with the File System Access API so batch clips save together.
+7. **Picking a place** — an OpenLayers picker with EOX street (OpenStreetMap), Sentinel-2 cloudless 2025 and terrain basemaps, plus Photon search.
 
-Two imagery sources:
+### Browser support
 
-- **Instant basemap** (default) — the EOX "Sentinel-2 cloudless" global mosaic
-  served as pre-rendered tiles (© EOX, [s2maps.eu](https://s2maps.eu), free for
-  non-commercial use). Tiles land in ~1-2 s, fully seamless — the immersive
-  option.
-- **Live Sentinel-2** — real dated scenes from S3 honoring the sidebar
-  date/cloud filters. Optimized for drift: only RGB+SCL assets, capped at the
-  4 least-cloudy scenes, one brightness stretch reused across tiles, and a
-  "Fill data gaps" option that patches cloud-mask holes from the unmasked
-  median.
+Best in a current Chromium browser (Chrome, Edge). MP4 recording needs WebCodecs and choosing a save folder needs the File System Access API; other browsers can still fly and record GIFs, with files downloading one at a time.
 
-The pan holds at a tile edge (with an indicator) rather than sliding into
-unloaded imagery, and the viewport is clamped to the mosaic on both the client
-and in exported frames. Start anywhere via "Custom coordinates", and
-"Preload 3×3 region" fetches the whole neighborhood up front for long
-uninterrupted corridors.
+## Data and credits
 
-### How it works
+- Contains modified **Copernicus Sentinel** data, processed by ESA. Recorded clips carry this credit in their captions.
+- Scene search: Element84 Earth Search; imagery hosted on the AWS Open Data registry.
+- Minimap and picker basemaps: EOX Sentinel-2 cloudless, street and terrain maps (© EOX IT Services GmbH, [s2maps.eu](https://s2maps.eu)); OpenStreetMap contributors.
+- Libraries: [OpenLayers](https://openlayers.org/), [geotiff.js](https://geotiffjs.github.io/), [mp4-muxer](https://github.com/Vanilagy/mp4-muxer), [gifenc](https://github.com/mattdesl/gifenc), [world-atlas](https://github.com/topojson/world-atlas).
+- Geocoding: [Photon](https://photon.komoot.io) by Komoot, OpenStreetMap data.
 
-1. `pystac_client` queries the free Element84 STAC catalog for Sentinel-2 L2A scenes matching the bbox, date range, and cloud cover threshold.
-2. `stackstac` lazily stacks the matching scenes into an `xarray.DataArray` in WGS-84, reading only the spatial subset needed from S3.
-3. Clouds are masked using the SCL band. A time-median composite is computed via Dask.
-4. The composite is rendered as a PNG image overlay on a Folium map. Clicking any pixel extracts the spectrum directly from the in-memory xarray — no additional S3 request.
-5. Open-Meteo provides live weather for the clicked point. Swap the base URL to `archive-api.open-meteo.com/v1/archive` and add `start_date`/`end_date` to align weather with the imagery dates.
+The previous Python/Streamlit version of this project (spectral analysis, wildfire dNBR and drift mode) is in this folder's git history.
