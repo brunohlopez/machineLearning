@@ -1,12 +1,10 @@
 """
 hsi_app.py
 ----------
-AVIRIS-NG hyperspectral Streamlit app — the high-resolution counterpart to
-geospatial/multispectral/app.py.
-
-Kept separate from app.py on purpose: HSI cubes are multi-GB and the rendering
-is heavier, so it shouldn't slow the Sentinel-2 app. Same UX patterns and the
-same index / dNBR logic, driven by a local AVIRIS-NG ENVI cube.
+AVIRIS-NG hyperspectral Streamlit app: catalog browser, spectral explorer and
+dNBR burn-scar mapping, driven by a local AVIRIS-NG ENVI cube. HSI cubes are
+multi-GB, so rendering is heavier than the Sentinel-2 work in
+geospatial/multispectral.
 
 Tabs
 ----

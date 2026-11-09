@@ -22,6 +22,16 @@ import geopandas as gpd
 import pandas as pd
 import requests
 
+# NASA/JPL AVIRIS-NG flight-line catalog (public Google Sheet, no auth needed).
+# Same sheet the Streamlit app (hsi_app.py) reads.
+CATALOG_CSV = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1g_yWgr4kwGPwVCDiFgCX3tZ9tAkxk-oDXxfqv5U4LeU/export?format=csv"
+)
+
+# Columns AVIRISProcessor needs from the catalog.
+_REQUIRED_CATALOG_COLUMNS = ("Name", "link_kml_outline")
+
 # ---------------------------------------------------------------------------
 # California DWR i15 crop code → description mapping
 # Source: California Department of Water Resources Land Use Survey
@@ -106,8 +116,11 @@ class AVIRISProcessor:
 
     Parameters
     ----------
-    excel_file : str
-        Path to the AVIRIS-NG Flight Lines Excel spreadsheet.
+    catalog : str, Path or pandas.DataFrame
+        The AVIRIS-NG flight-line catalog: either a path to an Excel (.xlsx)
+        or CSV export of it, or an already-loaded DataFrame. It must have
+        ``Name`` and ``link_kml_outline`` columns. Most of the time you want
+        :meth:`from_live_catalog` instead, which pulls the current catalog.
     kml_dir : str
         Directory to save downloaded KML files.
     shapefile_dir : str
@@ -115,15 +128,53 @@ class AVIRISProcessor:
 
     Example
     -------
-    >>> proc = AVIRISProcessor("AVIRIS-NG Flight Lines.xlsx", "kml/", "shapefiles/")
+    >>> proc = AVIRISProcessor.from_live_catalog("kml/", "shapefiles/")
     >>> proc.download_kml_files()
     >>> proc.convert_to_shapefiles()
     """
 
-    def __init__(self, excel_file: str, kml_dir: str, shapefile_dir: str):
+    def __init__(self, catalog, kml_dir: str, shapefile_dir: str):
         self.kml_dir       = Path(kml_dir)
         self.shapefile_dir = Path(shapefile_dir)
-        self.flight_lines  = pd.read_excel(excel_file)
+
+        if isinstance(catalog, pd.DataFrame):
+            flight_lines = catalog.copy()
+        elif str(catalog).lower().endswith(".csv"):
+            flight_lines = pd.read_csv(catalog, low_memory=False)
+        else:
+            flight_lines = pd.read_excel(catalog)
+
+        flight_lines.columns = [str(c).strip() for c in flight_lines.columns]
+        missing = [c for c in _REQUIRED_CATALOG_COLUMNS if c not in flight_lines.columns]
+        if missing:
+            raise ValueError(
+                f"Catalog is missing required column(s): {', '.join(missing)}"
+            )
+        self.flight_lines = flight_lines
+
+    @classmethod
+    def from_live_catalog(cls, kml_dir: str, shapefile_dir: str,
+                          url: str = CATALOG_CSV) -> "AVIRISProcessor":
+        """
+        Build a processor from the current NASA/JPL flight-line catalog
+        (public Google Sheet) so no spreadsheet needs to be downloaded or
+        kept in the repo.
+
+        Parameters
+        ----------
+        kml_dir, shapefile_dir : str
+            Same as the constructor.
+        url : str
+            CSV export URL (or local CSV path) of the catalog. Defaults to
+            the live JPL sheet, :data:`CATALOG_CSV`.
+        """
+        try:
+            catalog = pd.read_csv(url, low_memory=False)
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not load the AVIRIS-NG catalog from {url}: {e}"
+            ) from e
+        return cls(catalog, kml_dir, shapefile_dir)
 
     def download_kml_files(self, workers: int = 5) -> None:
         """Parallel KML download. Skips rows with missing links."""

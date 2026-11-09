@@ -1,12 +1,9 @@
 """
 aviris_analyzer.py
 ------------------
-AVIRIS-NG hyperspectral analysis — the hyperspectral counterpart to
-geospatial/multispectral/sentinel_analysis.py.
-
-Mirrors SentinelAnalyzer's interface (render_rgb / render_index / get_spectra /
-burn_scar_analysis) but is backed by a local ENVI cube read with the
-`spectral` library instead of streaming COGs from S3.
+AVIRIS-NG hyperspectral analysis: render_rgb / render_index / get_spectra /
+burn_scar_analysis, backed by a local ENVI cube read with the `spectral`
+library.
 
 Supports both AVIRIS-NG product levels:
   * L2 surface reflectance (`*corr_v*_img` / `*rfl*`) — atmospherically
@@ -38,7 +35,7 @@ from rasterio.warp import transform_bounds
 # Natural-colour band targets (nm) — AVIRIS-NG true colour
 RGB_WAVELENGTHS = {'red': 650.0, 'green': 550.0, 'blue': 470.0}
 
-# Same index names/colormaps as SentinelAnalyzer, for cross-app parity
+# Colormaps for each spectral index
 INDEX_COLORMAPS: Dict[str, str] = {
     'NDVI':  'RdYlGn',
     'NDWI':  'RdBu',

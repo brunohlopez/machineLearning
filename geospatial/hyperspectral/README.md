@@ -1,11 +1,11 @@
-﻿# AVIRIS-NG Hyperspectral
+# AVIRIS-NG Hyperspectral
 
 Two things live here:
 
 1. **Hyperspectral analysis app** (`hsi_app.py`) — interactive spectral
    exploration and dNBR burn-scar mapping on AVIRIS-NG L2 reflectance cubes.
-   The high-resolution counterpart to the Sentinel-2 app in
-   `../multispectral/app.py`.
+   A 3-5 m hyperspectral complement to the 10 m Sentinel-2 work in
+   [`../multispectral`](../multispectral).
 2. **Data prep utilities** (`aviris_processor.py`) — batch KML/shapefile tooling
    and California DWR i15 crop labeling.
 
@@ -21,9 +21,8 @@ severity, methane plume detection, mineralogy, and agricultural studies.
 | File | Description |
 |------|-------------|
 | `hsi_app.py` | Streamlit hyperspectral app (spectral + burn scar tabs) |
-| `aviris_analyzer.py` | `AVIRISAnalyzer` — ENVI reader mirroring `SentinelAnalyzer` |
-| `aviris_processor.py` | KML/shapefile + DWR crop-label utilities |
-| `AVIRIS-NG Flight Lines.xlsx` | NASA flight line index with KML links |
+| `aviris_analyzer.py` | `AVIRISAnalyzer` — ENVI reader (RGB, indices, spectra, dNBR) |
+| `aviris_processor.py` | KML/shapefile + DWR crop-label utilities; loads the live NASA/JPL flight-line catalog |
 | `requirements.txt` | Python dependencies |
 
 ## Hyperspectral App
@@ -62,27 +61,33 @@ Radiance is genuinely interesting in the Spectral Explorer — the uncorrected
 atmospheric absorption (O₂ at 760 nm, water vapor at 940/1140/1400/1900 nm)
 is visible in the raw spectrum.
 
-`AVIRISAnalyzer` mirrors `SentinelAnalyzer`'s interface (`render_rgb`,
-`render_index`, `get_spectra`, `burn_scar_analysis`) so the two apps share a
-mental model. Bands are looked up by nearest wavelength instead of by name;
-RGB stretch and normalized-difference indices are product-agnostic.
+`AVIRISAnalyzer` exposes `render_rgb`, `render_index`, `get_spectra` and
+`burn_scar_analysis`. Bands are looked up by nearest wavelength instead of by
+name; RGB stretch and normalized-difference indices are product-agnostic.
 
 ## Data Prep Utilities
 
 ### AVIRISProcessor
-Batch-download KML flight line outlines and convert to ESRI Shapefiles.
+Batch-download KML flight line outlines and convert to ESRI Shapefiles. The
+flight-line list is pulled straight from the live NASA/JPL catalog (the same
+public Google Sheet the app uses), so there is no spreadsheet to download or
+keep up to date.
 
 ```python
 from aviris_processor import AVIRISProcessor
 
-proc = AVIRISProcessor(
-    excel_file="AVIRIS-NG Flight Lines - AVIRIS-NG Flight Lines.xlsx",
+proc = AVIRISProcessor.from_live_catalog(
     kml_dir="kml/",
     shapefile_dir="shapefiles/",
 )
+proc.flight_lines          # the catalog as a pandas DataFrame (filter it first if you like)
 proc.download_kml_files()
 proc.convert_to_shapefiles()
 ```
+
+To work from a saved copy instead, pass a path to a `.xlsx`/`.csv` export (or a
+DataFrame) as the first argument: `AVIRISProcessor("catalog.csv", "kml/", "shapefiles/")`.
+The catalog needs `Name` and `link_kml_outline` columns.
 
 ### ShapefileProcessor / ShapefileSplitter / ShapefileToMap
 Label California DWR i15 land-use shapefiles with crop types, split per
