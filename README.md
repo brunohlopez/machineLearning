@@ -8,8 +8,9 @@ Projects at the intersection of geospatial data science, remote sensing, and mac
 
 | Project | Description | Stack |
 |---|---|---|
-| [Sentinel-2 Multispectral Analysis](geospatial/multispectral) | Interactive spectral analysis tool and timelapse creator for Sentinel-2 imagery with 15 spectral indices | GEE, geemap, Streamlit |
-| [AVIRIS-NG Hyperspectral Processing](geospatial/hyperspectral) | Batch KML download and conversion pipeline for AVIRIS-NG airborne hyperspectral flight lines | requests, pandas, GDAL |
+| [Sentinel Flyover](geospatial/multispectral) | Browser-based, continuous flyover of live Sentinel-2 L2A imagery: band composites, spectral indices, ~90 curated places, and GIF/MP4 clip recording. No server or API keys. | JavaScript, OpenLayers, geotiff.js, STAC |
+| [AVIRIS-NG Hyperspectral](geospatial/hyperspectral) | Streamlit app for browsing the NASA/JPL flight-line catalog, exploring ~422-band spectra and mapping burn scars (dNBR), plus KML/shapefile utilities | Python, Streamlit, rasterio, GDAL |
+| [Land Cover Time Series](geospatial/landcover_timeseries) | Draw an area, browse individual Sentinel-2 / Landsat scenes, and chart Dynamic World land-cover change over time | Python, Streamlit, Google Earth Engine |
 
 ### Computer Vision
 
